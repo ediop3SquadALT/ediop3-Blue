@@ -20,7 +20,11 @@ cd ediop3-Blue
 
 and run this.
 
-for help commands run "bash ediop3Blue.sh"
-to run the tool "bash ediop3Blue.sh -start
+for help commands run
+
+sudo python3 ediop3Blue.py
+to run the tool 
+
+sudo python3 ediop3Blue.py -start
 
 
