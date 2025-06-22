@@ -5,26 +5,26 @@ remember it won't work if target isn't vulnerable to CVE-2023-45866 or is patche
 steps to do
 (only works on OS's like kali parrot os. and it ofc requires root)
 
-sudo apt update && sudo apt install -y git python3 python3-pip bluetooth bluez bluez-tools bluez-hcidump libbluetooth-dev libglib2.0-dev && pip3 install pygatt
-
-there.
-
+setup:
+```
+sudo bash setup.sh
+```
 and to install this tool..
-
-git clone
-gttps://github.com/ediop3SquadALT/ediop3-Blue
-
+```
+git clone gttps://github.com/ediop3SquadALT/ediop3-Blue
+```
 then 
-
+```
 cd ediop3-Blue
-
+```
 and run this.
 
 for help commands run
-
+```
 sudo python3 ediop3Blue.py
+```
 to run the tool 
-
+```
 sudo python3 ediop3Blue.py -start
-
+``
 
