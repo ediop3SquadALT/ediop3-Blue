@@ -25,6 +25,6 @@ sudo python3 ediop3Blue.py
 ```
 to run the tool 
 ```
-sudo python3 ediop3Blue.py -start
-``
+sudo python3 ediop3Blue.py
+```
 
